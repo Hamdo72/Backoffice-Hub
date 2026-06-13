@@ -1027,7 +1027,9 @@ async function refreshCloudState(){
 
 async function cloudSaveKey(key,value){
   if(!isCloudConfigured()) return {success:false,message:'Cloud API URL not configured'};
-  return await cloudJsonp('updateKey',{key,value},25000);
+  const state=getStateSnapshot();
+  state[key]=value;
+  return await cloudJsonp('saveState',{state},25000);
 }
 
 function getStateSnapshot(){

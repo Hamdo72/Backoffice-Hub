@@ -1002,6 +1002,34 @@ function cloudJsonp(action,payload={},timeout=20000){
   });
 }
 
+async function refreshCloudState(){
+  if(!isCloudConfigured()) return false;
+  try{
+    const res=await cloudJsonp('getState',{},25000);
+    if(res && res.success && res.state){
+      CLOUD_KEYS.forEach(k=>{
+        if(Object.prototype.hasOwnProperty.call(res.state,k) && res.state[k]!==null && res.state[k]!==undefined){
+          LS.rawSet(k,res.state[k]);
+        }
+      });
+      ensureLocalDefaults();
+      CLOUD_READY=true;
+      return true;
+    }
+    CLOUD_READY=false;
+    return false;
+  }catch(err){
+    console.warn('Cloud refresh failed:',err);
+    CLOUD_READY=false;
+    return false;
+  }
+}
+
+async function cloudSaveKey(key,value){
+  if(!isCloudConfigured()) return {success:false,message:'Cloud API URL not configured'};
+  return await cloudJsonp('updateKey',{key,value},25000);
+}
+
 function getStateSnapshot(){
   const state={};
   CLOUD_KEYS.forEach(k=>state[k]=LS.get(k));
@@ -1063,23 +1091,9 @@ function ensureLocalDefaults(){
 async function initData(){
   ensureLocalDefaults();
   if(!isCloudConfigured()) return;
-  try{
-    const res=await cloudJsonp('getState');
-    if(res && res.success && res.state){
-      CLOUD_KEYS.forEach(k=>{
-        if(Object.prototype.hasOwnProperty.call(res.state,k) && res.state[k]!==null && res.state[k]!==undefined){
-          LS.rawSet(k,res.state[k]);
-        }
-      });
-      ensureLocalDefaults();
-      CLOUD_READY=true;
-    }else{
-      CLOUD_READY=true;
-      queueCloudSync();
-    }
-  }catch(err){
-    console.warn('Cloud backend not reachable. Using local backup:',err);
-    CLOUD_READY=false;
+  const ok=await refreshCloudState();
+  if(!ok){
+    console.warn('Cloud backend not reachable. Using local backup.');
   }
 }
 
@@ -1135,7 +1149,7 @@ function toggleCreateForm(){
   const show=f.classList.toggle('hide');
   if(t) t.textContent=show?'▾ Show Form':'▴ Hide Form';
 }
-function createMember(){
+async function createMember(){
   const fn=document.getElementById('cm-fn')?.value.trim();
   const ln=document.getElementById('cm-ln')?.value.trim();
   const un=document.getElementById('cm-un')?.value.trim().toLowerCase().replace(/\s+/g,'');
@@ -1146,20 +1160,39 @@ function createMember(){
   if(!fn||!ln||!un||!pw){if(err)err.textContent='Please fill in all fields.';return;}
   if(pw.length<6){if(err)err.textContent='Password must be at least 6 characters.';return;}
   if(!/^[a-z0-9._-]+$/.test(un)){if(err)err.textContent='Username: letters, numbers, dots, dashes only.';return;}
+
+  // Always refresh first so the manager does not overwrite users created from another browser.
+  if(isCloudConfigured()) await refreshCloudState();
+
   const users=getUsers();
   if(users.find(u=>u.un===un)){if(err)err.textContent='Username "'+un+'" is already taken.';return;}
-  if(err)err.textContent='';
+  if(err)err.textContent='Saving user to Google Sheet…';
   const nid=Math.max(...users.map(u=>u.id),0)+1;
-  users.push({id:nid,fn,ln,un,pw,role:role||'Team Member',access:acc,active:true,approved:true,color:COLORS[nid%COLORS.length]});
+  const nu={id:nid,fn,ln,un,pw,role:role||'Team Member',access:acc,active:true,approved:true,color:COLORS[nid%COLORS.length]};
+  users.push(nu);
   LS.set(K.users,users);
-  // Clear form
+
+  if(isCloudConfigured()){
+    try{
+      const res=await cloudSaveKey(K.users,users);
+      if(!res || !res.success){
+        if(err)err.textContent='User created locally, but Google Sheet save failed: '+(res?.message||'Unknown error');
+        return;
+      }
+      await refreshCloudState();
+    }catch(ex){
+      if(err)err.textContent='User created locally, but Google Sheet save failed: '+ex.message;
+      return;
+    }
+  }
+
   ['cm-fn','cm-ln','cm-un','cm-pw','cm-role'].forEach(id=>{const e=document.getElementById(id);if(e)e.value='';});
-  document.getElementById('cm-acc').value='member';
-  // Show success
+  const accEl=document.getElementById('cm-acc'); if(accEl) accEl.value='member';
+  if(err)err.textContent='';
   const card=document.getElementById('create-member-card');
   const msg=document.createElement('div');msg.className='alert-success';msg.style.margin='8px 0 0';
-  msg.textContent=`✓ Account created for ${fn} ${ln} (@${un})`;
-  card?.appendChild(msg);setTimeout(()=>msg.remove(),3000);
+  msg.textContent=`✓ Account created and saved to Google Sheet for ${fn} ${ln} (@${un})`;
+  card?.appendChild(msg);setTimeout(()=>msg.remove(),4000);
   renderUsers();
 }
 
@@ -1177,17 +1210,28 @@ function switchTab(t){
   const re=document.getElementById('reg-err');if(re)re.textContent='';
 }
 function selectRole(r){regRole=r;document.getElementById('ropt-member').classList.toggle('on',r==='member');document.getElementById('ropt-manager').classList.toggle('on',r==='manager');}
-function doLogin(){
+async function doLogin(){
   const un=document.getElementById('li-u').value.trim().toLowerCase(),pw=document.getElementById('li-p').value;
   const err=document.getElementById('sign-err');
   if(!un||!pw){err.textContent='Please enter username and password.';return;}
-  const u=getUsers().find(x=>x.un===un&&x.pw===pw&&x.active);
-  if(!u){err.textContent='Incorrect username or password.';return;}
+  err.textContent='Checking Google Sheet login…';
+
+  // Critical: pull latest users from Google Sheet before validating credentials.
+  if(isCloudConfigured()){
+    const ok=await refreshCloudState();
+    if(!ok){
+      err.textContent='Cannot connect to Google Sheet backend. Check Apps Script deployment/access or token.';
+      return;
+    }
+  }
+
+  const u=getUsers().find(x=>String(x.un).toLowerCase()===un&&String(x.pw)===String(pw)&&x.active);
+  if(!u){err.textContent='Incorrect username or password, or user is not saved in Google Sheet.';return;}
   if(!u.approved){err.textContent='Your account is pending manager approval.';return;}
   err.textContent='';CU=u;LS.set(K.session,{id:CU.id});
   document.getElementById('auth-screen').style.display='none';document.getElementById('app-screen').classList.add('on');boot();
 }
-function doRegister(){
+async function doRegister(){
   const fn=document.getElementById('r-fn').value.trim(),ln=document.getElementById('r-ln').value.trim();
   const un=document.getElementById('r-un').value.trim().toLowerCase().replace(/\s+/g,'');
   const pw=document.getElementById('r-pw').value,role=document.getElementById('r-role').value.trim();
@@ -1195,10 +1239,16 @@ function doRegister(){
   if(!fn||!ln||!un||!pw){err.textContent='Please fill in all fields.';return;}
   if(pw.length<6){err.textContent='Password must be at least 6 characters.';return;}
   if(!/^[a-z0-9._-]+$/.test(un)){err.textContent='Username: letters, numbers, dots, dashes only.';return;}
+  if(isCloudConfigured()) await refreshCloudState();
   const users=getUsers();if(users.find(u=>u.un===un)){err.textContent='Username taken.';return;}
-  err.textContent='';const nid=Math.max(...users.map(u=>u.id),0)+1;
+  err.textContent='Saving account to Google Sheet…';const nid=Math.max(...users.map(u=>u.id),0)+1;
   const nu={id:nid,fn,ln,un,pw,role:role||'Team Member',access:regRole,active:true,approved:true,color:COLORS[nid%COLORS.length]};
-  users.push(nu);LS.set(K.users,users);CU=nu;LS.set(K.session,{id:CU.id});
+  users.push(nu);LS.set(K.users,users);
+  if(isCloudConfigured()){
+    const res=await cloudSaveKey(K.users,users);
+    if(!res||!res.success){err.textContent='Account created locally, but Google Sheet save failed: '+(res?.message||'Unknown error');return;}
+  }
+  CU=nu;LS.set(K.session,{id:CU.id});
   document.getElementById('auth-screen').style.display='none';document.getElementById('app-screen').classList.add('on');boot();
 }
 function doLogout(){

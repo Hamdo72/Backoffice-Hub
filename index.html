@@ -961,7 +961,7 @@ select.fi{cursor:pointer}
 <script>
 /* ══ CLOUD BACKEND SETTINGS ══
    This keeps the original Backoffice Hub design/features exactly as-is,
-   while storing shared data in Google Sheet through Apps Script. V5 Stable uses getState/saveState only and keeps manager recovery login. */
+   while storing shared data in Google Sheet through Apps Script. V6 uses getState/updateKey for user saves to avoid long URL failures and keeps manager recovery login. */
 const CLOUD_API_URL='https://script.google.com/macros/s/AKfycbxqnIj7mBqO-ry6SjRSA-WiQh58_otCiUWZhXdJFlC6pJnDBioc53pyjKdiMg_XI5kJsQ/exec';
 const CLOUD_TOKEN='HAMDO_CC_2026_PRIVATE';
 
@@ -1027,9 +1027,8 @@ async function refreshCloudState(){
 
 async function cloudSaveKey(key,value){
   if(!isCloudConfigured()) return {success:false,message:'Cloud API URL not configured'};
-  const state=getStateSnapshot();
-  state[key]=value;
-  return await cloudJsonp('saveState',{state},25000);
+  // Save only the changed key. This avoids oversized JSONP URLs when the full app state grows.
+  return await cloudJsonp('updateKey',{key,value},25000);
 }
 
 function getStateSnapshot(){

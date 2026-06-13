@@ -1032,6 +1032,11 @@ async function cloudSaveKey(key,value){
   return await cloudJsonp('saveState',{state},25000);
 }
 
+async function cloudCreateUser(user){
+  if(!isCloudConfigured()) return {success:false,message:'Cloud API URL not configured'};
+  return await cloudJsonp('createUser',{user},25000);
+}
+
 function getStateSnapshot(){
   const state={};
   CLOUD_KEYS.forEach(k=>state[k]=LS.get(k));
@@ -1171,21 +1176,26 @@ async function createMember(){
   if(err)err.textContent='Saving user to Google Sheet…';
   const nid=Math.max(...users.map(u=>u.id),0)+1;
   const nu={id:nid,fn,ln,un,pw,role:role||'Team Member',access:acc,active:true,approved:true,color:COLORS[nid%COLORS.length]};
-  users.push(nu);
-  LS.set(K.users,users);
 
   if(isCloudConfigured()){
     try{
-      const res=await cloudSaveKey(K.users,users);
+      const res=await cloudCreateUser(nu);
       if(!res || !res.success){
-        if(err)err.textContent='User created locally, but Google Sheet save failed: '+(res?.message||'Unknown error');
+        if(err)err.textContent='Google Sheet save failed: '+(res?.message||'Unknown error');
         return;
       }
-      await refreshCloudState();
+      if(res.state){
+        CLOUD_KEYS.forEach(k=>{ if(Object.prototype.hasOwnProperty.call(res.state,k)) LS.rawSet(k,res.state[k]); });
+      }else{
+        await refreshCloudState();
+      }
     }catch(ex){
-      if(err)err.textContent='User created locally, but Google Sheet save failed: '+ex.message;
+      if(err)err.textContent='Google Sheet save failed: '+ex.message;
       return;
     }
+  }else{
+    users.push(nu);
+    LS.set(K.users,users);
   }
 
   ['cm-fn','cm-ln','cm-un','cm-pw','cm-role'].forEach(id=>{const e=document.getElementById(id);if(e)e.value='';});
@@ -1244,11 +1254,14 @@ async function doRegister(){
   if(isCloudConfigured()) await refreshCloudState();
   const users=getUsers();if(users.find(u=>u.un===un)){err.textContent='Username taken.';return;}
   err.textContent='Saving account to Google Sheet…';const nid=Math.max(...users.map(u=>u.id),0)+1;
-  const nu={id:nid,fn,ln,un,pw,role:role||'Team Member',access:regRole,active:true,approved:true,color:COLORS[nid%COLORS.length]};
-  users.push(nu);LS.set(K.users,users);
+  let nu={id:nid,fn,ln,un,pw,role:role||'Team Member',access:regRole,active:true,approved:true,color:COLORS[nid%COLORS.length]};
   if(isCloudConfigured()){
-    const res=await cloudSaveKey(K.users,users);
-    if(!res||!res.success){err.textContent='Account created locally, but Google Sheet save failed: '+(res?.message||'Unknown error');return;}
+    const res=await cloudCreateUser(nu);
+    if(!res||!res.success){err.textContent='Google Sheet save failed: '+(res?.message||'Unknown error');return;}
+    if(res.state){CLOUD_KEYS.forEach(k=>{if(Object.prototype.hasOwnProperty.call(res.state,k)) LS.rawSet(k,res.state[k]);});}
+    if(res.user) nu=res.user;
+  }else{
+    users.push(nu);LS.set(K.users,users);
   }
   CU=nu;LS.set(K.session,{id:CU.id});
   document.getElementById('auth-screen').style.display='none';document.getElementById('app-screen').classList.add('on');boot();

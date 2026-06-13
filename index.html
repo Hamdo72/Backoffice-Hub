@@ -961,8 +961,8 @@ select.fi{cursor:pointer}
 <script>
 /* ══ CLOUD BACKEND SETTINGS ══
    This keeps the original Backoffice Hub design/features exactly as-is,
-   while storing shared data in Google Sheet through Apps Script. */
-const CLOUD_API_URL='https://script.google.com/macros/s/AKfycbzGlne5j-9Jy0JsRbdY4Kmsw0SNi65gn_gnYVtym6zB3gr-fzkzqOzJjmMp4SYwyPIatQ/exec';
+   while storing shared data in Google Sheet through Apps Script. V5 Stable uses getState/saveState only and keeps manager recovery login. */
+const CLOUD_API_URL='https://script.google.com/macros/s/AKfycbxqnIj7mBqO-ry6SjRSA-WiQh58_otCiUWZhXdJFlC6pJnDBioc53pyjKdiMg_XI5kJsQ/exec';
 const CLOUD_TOKEN='HAMDO_CC_2026_PRIVATE';
 
 /* ══ STORAGE ══ */
@@ -1030,11 +1030,6 @@ async function cloudSaveKey(key,value){
   const state=getStateSnapshot();
   state[key]=value;
   return await cloudJsonp('saveState',{state},25000);
-}
-
-async function cloudCreateUser(user){
-  if(!isCloudConfigured()) return {success:false,message:'Cloud API URL not configured'};
-  return await cloudJsonp('createUser',{user},25000);
 }
 
 function getStateSnapshot(){
@@ -1176,26 +1171,21 @@ async function createMember(){
   if(err)err.textContent='Saving user to Google Sheet…';
   const nid=Math.max(...users.map(u=>u.id),0)+1;
   const nu={id:nid,fn,ln,un,pw,role:role||'Team Member',access:acc,active:true,approved:true,color:COLORS[nid%COLORS.length]};
+  users.push(nu);
+  LS.set(K.users,users);
 
   if(isCloudConfigured()){
     try{
-      const res=await cloudCreateUser(nu);
+      const res=await cloudSaveKey(K.users,users);
       if(!res || !res.success){
-        if(err)err.textContent='Google Sheet save failed: '+(res?.message||'Unknown error');
+        if(err)err.textContent='User created locally, but Google Sheet save failed: '+(res?.message||'Unknown error');
         return;
       }
-      if(res.state){
-        CLOUD_KEYS.forEach(k=>{ if(Object.prototype.hasOwnProperty.call(res.state,k)) LS.rawSet(k,res.state[k]); });
-      }else{
-        await refreshCloudState();
-      }
+      await refreshCloudState();
     }catch(ex){
-      if(err)err.textContent='Google Sheet save failed: '+ex.message;
+      if(err)err.textContent='User created locally, but Google Sheet save failed: '+ex.message;
       return;
     }
-  }else{
-    users.push(nu);
-    LS.set(K.users,users);
   }
 
   ['cm-fn','cm-ln','cm-un','cm-pw','cm-role'].forEach(id=>{const e=document.getElementById(id);if(e)e.value='';});
@@ -1226,19 +1216,36 @@ async function doLogin(){
   const un=document.getElementById('li-u').value.trim().toLowerCase(),pw=document.getElementById('li-p').value;
   const err=document.getElementById('sign-err');
   if(!un||!pw){err.textContent='Please enter username and password.';return;}
-  err.textContent='Checking Google Sheet login…';
 
-  // Critical: pull latest users from Google Sheet before validating credentials.
+  const defaultManager=DEFAULT_USERS.find(x=>String(x.un).toLowerCase()===un&&String(x.pw)===String(pw));
+
+  // Critical: pull latest users from Google Sheet before validating normal users.
+  // Recovery rule: manager can still login even if Google Sheet backend is down, so the app is never locked.
   if(isCloudConfigured()){
+    err.textContent='Checking Google Sheet login…';
     const ok=await refreshCloudState();
     if(!ok){
-      err.textContent='Cannot connect to Google Sheet backend. Check Apps Script deployment/access or token.';
+      if(defaultManager){
+        err.textContent='Google Sheet is not reachable — opening manager in recovery mode.';
+        CU=defaultManager;
+        ensureLocalDefaults();
+        LS.set(K.session,{id:CU.id});
+        document.getElementById('auth-screen').style.display='none';
+        document.getElementById('app-screen').classList.add('on');
+        boot();
+        return;
+      }
+      err.textContent='Cannot connect to Google Sheet backend. Manager can still use manager/admin123 for recovery.';
       return;
     }
   }
 
-  const u=getUsers().find(x=>String(x.un).toLowerCase()===un&&String(x.pw)===String(pw)&&x.active);
-  if(!u){err.textContent='Incorrect username or password, or user is not saved in Google Sheet.';return;}
+  let u=getUsers().find(x=>String(x.un).toLowerCase()===un&&String(x.pw)===String(pw)&&x.active);
+  if(!u && defaultManager){
+    // If AppState was corrupted or missing the manager row, keep a safe admin path.
+    u=defaultManager;
+  }
+  if(!u){err.textContent='Incorrect username/password, or the user is not saved in Google Sheet.';return;}
   if(!u.approved){err.textContent='Your account is pending manager approval.';return;}
   err.textContent='';CU=u;LS.set(K.session,{id:CU.id});
   document.getElementById('auth-screen').style.display='none';document.getElementById('app-screen').classList.add('on');boot();
@@ -1254,14 +1261,11 @@ async function doRegister(){
   if(isCloudConfigured()) await refreshCloudState();
   const users=getUsers();if(users.find(u=>u.un===un)){err.textContent='Username taken.';return;}
   err.textContent='Saving account to Google Sheet…';const nid=Math.max(...users.map(u=>u.id),0)+1;
-  let nu={id:nid,fn,ln,un,pw,role:role||'Team Member',access:regRole,active:true,approved:true,color:COLORS[nid%COLORS.length]};
+  const nu={id:nid,fn,ln,un,pw,role:role||'Team Member',access:regRole,active:true,approved:true,color:COLORS[nid%COLORS.length]};
+  users.push(nu);LS.set(K.users,users);
   if(isCloudConfigured()){
-    const res=await cloudCreateUser(nu);
-    if(!res||!res.success){err.textContent='Google Sheet save failed: '+(res?.message||'Unknown error');return;}
-    if(res.state){CLOUD_KEYS.forEach(k=>{if(Object.prototype.hasOwnProperty.call(res.state,k)) LS.rawSet(k,res.state[k]);});}
-    if(res.user) nu=res.user;
-  }else{
-    users.push(nu);LS.set(K.users,users);
+    const res=await cloudSaveKey(K.users,users);
+    if(!res||!res.success){err.textContent='Account created locally, but Google Sheet save failed: '+(res?.message||'Unknown error');return;}
   }
   CU=nu;LS.set(K.session,{id:CU.id});
   document.getElementById('auth-screen').style.display='none';document.getElementById('app-screen').classList.add('on');boot();
